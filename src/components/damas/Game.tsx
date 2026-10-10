@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chooseMove } from "@/lib/damas/ai";
 import {
   countPieces,
@@ -11,12 +11,15 @@ import {
   type Side,
   type Status,
 } from "@/lib/damas/rules";
+import { useP2PRoom, type PeerInfo } from "@/lib/multiplayer";
 import { Cap } from "./Cap";
 import { COUNTRIES, countryName, type CountryId } from "./flags";
+import { playCap, primeCaps } from "@/lib/damas/sounds";
 
 const SAVE = "ddamas-v1";
 
-type Mode = "ai" | "hotseat";
+type Mode = "ai" | "hotseat" | "online";
+type Screen = "home" | "table" | "play";
 
 type Save = {
   you: CountryId;
@@ -32,31 +35,55 @@ type Flight = {
   fromStatus: Status;
 };
 
+type NetHello = {
+  t: "hello";
+  you: CountryId;
+  them: CountryId;
+  status: Status;
+  pending?: Move | null;
+};
+
 function same(a: Pos, b: Pos) {
   return a.r === b.r && a.c === b.c;
 }
 
-let audio: AudioContext | null = null;
+function sameMove(a: Move, b: Move) {
+  return (
+    same(a.from, b.from) &&
+    same(a.to, b.to) &&
+    a.captures.length === b.captures.length &&
+    a.captures.every((cap, index) => same(cap, b.captures[index]))
+  );
+}
 
-function blip(freq: number) {
-  const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-  if (!Ctx) return;
-  audio = audio ?? new Ctx();
-  if (audio.state === "suspended") void audio.resume();
-  const osc = audio.createOscillator();
-  const gain = audio.createGain();
-  osc.frequency.value = freq;
-  gain.gain.value = 0.045;
-  osc.connect(gain);
-  gain.connect(audio.destination);
-  osc.start();
-  gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.09);
-  osc.stop(audio.currentTime + 0.1);
+function freshCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 4; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return code;
+}
+
+function isCountry(value: unknown): value is CountryId {
+  return COUNTRIES.some((country) => country.id === value);
+}
+
+function isMove(value: unknown): value is Move {
+  if (!value || typeof value !== "object") return false;
+  const move = value as Move;
+  return Boolean(move.from && move.to && Array.isArray(move.captures) && Array.isArray(move.path));
+}
+
+function isStatus(value: unknown): value is Status {
+  if (!value || typeof value !== "object") return false;
+  const status = value as Status;
+  if (!Array.isArray(status.board) || status.board.length !== 10) return false;
+  if (status.turn !== "gold" && status.turn !== "silver") return false;
+  return status.board.every((row) => Array.isArray(row) && row.length === 10);
 }
 
 export function Game() {
   const [ready, setReady] = useState(false);
-  const [screen, setScreen] = useState<"home" | "play">("home");
+  const [screen, setScreen] = useState<Screen>("home");
   const [you, setYou] = useState<CountryId>("do");
   const [them, setThem] = useState<CountryId>("pr");
   const [mode, setMode] = useState<Mode>("ai");
@@ -69,12 +96,36 @@ export function Game() {
   const [crowned, setCrowned] = useState<string | null>(null);
   const [flight, setFlight] = useState<Flight | null>(null);
   const [glide, setGlide] = useState(false);
+  const [link, setLink] = useState<null | { code: string; role: "host" | "guest" }>(null);
+  const [draft, setDraft] = useState("");
+  const [joinError, setJoinError] = useState("");
+  const [peerState, setPeerState] = useState<"wait" | "ok" | "fail">("wait");
+  const [peers, setPeers] = useState<PeerInfo[]>([]);
+  const sendRef = useRef<(data: unknown) => void>(() => {});
+  const statusRef = useRef(status);
+  const flightRef = useRef(flight);
+  const queueRef = useRef<Move[]>([]);
+  const earlyRef = useRef<Move[]>([]);
+  const greeted = useRef(false);
+  const acked = useRef(false);
+  const linkRef = useRef(link);
+  const youRef = useRef(you);
+  const themRef = useRef(them);
+  const peersRef = useRef(peers);
+  const onNetRef = useRef<(data: unknown) => void>(() => {});
+  statusRef.current = status;
+  flightRef.current = flight;
+  linkRef.current = link;
+  youRef.current = you;
+  themRef.current = them;
+  peersRef.current = peers;
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem(SAVE);
       if (raw) {
         const saved = JSON.parse(raw) as Save;
+        if (saved.mode === "online") return;
         setYou(saved.you);
         setThem(saved.them);
         setMode(saved.mode);
@@ -88,7 +139,7 @@ export function Game() {
   }, []);
 
   useEffect(() => {
-    if (!ready || screen !== "play") return;
+    if (!ready || screen !== "play" || mode === "online") return;
     const payload: Save = { you, them, mode, status };
     localStorage.setItem(SAVE, JSON.stringify(payload));
   }, [ready, screen, you, them, mode, status]);
@@ -97,7 +148,12 @@ export function Game() {
     () => (status.winner ? [] : legalMoves(status.board, status.turn)),
     [status],
   );
-  const human = (mode === "hotseat" || status.turn === "gold") && !flight;
+  const mySide: Side = link?.role === "guest" ? "silver" : "gold";
+  const human =
+    !flight &&
+    (mode === "hotseat" ||
+      (mode === "ai" && status.turn === "gold") ||
+      (mode === "online" && status.turn === mySide && (link?.role !== "guest" || peerState === "ok")));
   const thinking = screen === "play" && mode === "ai" && status.turn === "silver" && !status.winner && !flight;
 
   useEffect(() => {
@@ -110,38 +166,110 @@ export function Game() {
       return () => cancelAnimationFrame(frame);
     }
     const last = flight.move.path.length - 1;
-    if (flight.hop < last) {
-      const wait = flight.hop === 0 ? 30 : 460;
-      const timer = window.setTimeout(() => {
-        if (flight.move.captures[flight.hop]) blip(190);
-        else blip(340);
-        setFlight((current) => (current ? { ...current, hop: current.hop + 1 } : current));
-      }, wait);
-      return () => window.clearTimeout(timer);
+    const timers: number[] = [];
+    if (flight.hop > 0 && !(flight.move.promote && flight.hop === last)) {
+      timers.push(
+        window.setTimeout(() => {
+          if (flight.move.captures[flight.hop - 1]) playCap("take");
+          else playCap("step");
+        }, 400),
+      );
     }
-    const timer = window.setTimeout(() => {
-      const { move, remember, fromStatus } = flight;
-      if (remember) setPast((stack) => [...stack, fromStatus].slice(-40));
-      setStatus(step(fromStatus, move));
-      setFlight(null);
-      setGlide(false);
-      if (move.promote) {
-        setCrowned(`${move.to.r}-${move.to.c}`);
-        setNote("Dama.");
-        blip(620);
-      } else if (move.captures.length > 0) {
-        const n = move.captures.length;
-        const mine = fromStatus.turn === "gold";
-        setNote(mode === "hotseat" ? `Come ${n}.` : mine ? `Comiste ${n}.` : `Te comieron ${n}.`);
-      } else {
-        setNote("");
+    if (flight.hop < last) {
+      timers.push(
+        window.setTimeout(() => {
+          setFlight((current) => (current ? { ...current, hop: current.hop + 1 } : current));
+        }, flight.hop === 0 ? 30 : 460),
+      );
+    } else {
+      timers.push(
+        window.setTimeout(() => {
+          const { move, remember, fromStatus } = flight;
+          if (remember) setPast((stack) => [...stack, fromStatus].slice(-40));
+          setStatus(step(fromStatus, move));
+          flightRef.current = null;
+          setFlight(null);
+          setGlide(false);
+          if (move.promote) {
+            setCrowned(`${move.to.r}-${move.to.c}`);
+            setNote("Dama.");
+            playCap("crown");
+          } else if (move.captures.length > 0) {
+            const n = move.captures.length;
+            const mine = mode === "online" ? fromStatus.turn === mySide : fromStatus.turn === "gold";
+            setNote(mode === "hotseat" ? `Come ${n}.` : mine ? `Comiste ${n}.` : `Te comieron ${n}.`);
+          } else {
+            setNote("");
+          }
+          if (typeof navigator !== "undefined" && navigator.vibrate) {
+            navigator.vibrate(move.captures.length > 1 ? [10, 40, 10] : 12);
+          }
+        }, 420),
+      );
+    }
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [flight, glide, mode, mySide]);
+
+  useEffect(() => {
+    const unlock = () => primeCaps();
+    window.addEventListener("pointerdown", unlock);
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, []);
+
+  useEffect(() => {
+    if (flight) return;
+    let guard = 0;
+    while (queueRef.current.length && guard++ < 8) {
+      const next = queueRef.current.shift();
+      if (!next) break;
+      const legal = legalMoves(statusRef.current.board, statusRef.current.turn);
+      const found = legal.find((move) => sameMove(move, next));
+      if (found) {
+        commit(found, false);
+        return;
       }
-      if (typeof navigator !== "undefined" && navigator.vibrate) {
-        navigator.vibrate(move.captures.length > 1 ? [10, 40, 10] : 12);
+    }
+    // commit is the local function; status/flight are the gates
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flight, status]);
+
+  useEffect(() => {
+    if (screen !== "play" || mode !== "online") return;
+    const timer = window.setInterval(() => {
+      const linkNow = linkRef.current;
+      if (!linkNow) return;
+      const list = peersRef.current;
+      const connected = list.some((peer) => peer.connectionState === "connected");
+      const failed = list.length > 0 && list.every((peer) => peer.connectionState === "failed");
+      if (linkNow.role === "host") {
+        setPeerState(connected ? "ok" : failed ? "fail" : "wait");
+        if (!connected || acked.current) return;
+        const flying = flightRef.current;
+        const hello: NetHello = {
+          t: "hello",
+          you: youRef.current,
+          them: themRef.current,
+          status: statusRef.current,
+          pending: flying?.remember ? flying.move : null,
+        };
+        sendRef.current(hello);
+        return;
       }
-    }, 420);
-    return () => window.clearTimeout(timer);
-  }, [flight, glide, mode]);
+      if (!greeted.current) setPeerState(failed ? "fail" : "wait");
+      else if (!connected && failed) setPeerState("fail");
+      else if (!connected) setPeerState("wait");
+      else setPeerState("ok");
+    }, 600);
+    return () => window.clearInterval(timer);
+  }, [screen, mode]);
+
+  const peerIdRef = useRef("");
+  useEffect(() => {
+    const id = peers.find((peer) => peer.connectionState === "connected")?.id ?? "";
+    if (id === peerIdRef.current) return;
+    peerIdRef.current = id;
+    acked.current = false;
+  }, [peers]);
 
   useEffect(() => {
     if (!thinking) return;
@@ -156,22 +284,95 @@ export function Game() {
   }, [thinking, status]);
 
   function begin(nextMode: Mode) {
+    primeCaps();
     const fresh = createStatus();
+    setLink(null);
     setMode(nextMode);
     setStatus(fresh);
     setPast([]);
     setSelected(null);
     setPreview(null);
+    setFlight(null);
+    flightRef.current = null;
+    queueRef.current = [];
+    earlyRef.current = [];
+    greeted.current = false;
+    acked.current = false;
     setNote(nextMode === "ai" ? "Oro sale. Te toca." : "Oro sale.");
     setScreen("play");
     localStorage.setItem(SAVE, JSON.stringify({ you, them, mode: nextMode, status: fresh }));
   }
 
-  function commit(move: Move, remember: boolean) {
-    if (flight) return;
+  function openTable() {
+    primeCaps();
+    setJoinError("");
+    setScreen("table");
+  }
+
+  function createTable() {
+    primeCaps();
+    const code = freshCode();
+    const fresh = createStatus();
+    localStorage.removeItem(SAVE);
+    setLink({ code, role: "host" });
+    setMode("online");
+    setStatus(fresh);
+    setPast([]);
     setSelected(null);
     setPreview(null);
-    setFlight({ move, remember, hop: 0, fromStatus: status });
+    setFlight(null);
+    flightRef.current = null;
+    queueRef.current = [];
+    earlyRef.current = [];
+    greeted.current = false;
+    acked.current = false;
+    peerIdRef.current = "";
+    setPeerState("wait");
+    setPeers([]);
+    setNote("Oro sale. Pásale el código.");
+    setScreen("play");
+  }
+
+  function joinTable() {
+    primeCaps();
+    const code = draft.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+    if (code.length < 4) {
+      setJoinError("El código tiene 4 letras.");
+      return;
+    }
+    const fresh = createStatus();
+    localStorage.removeItem(SAVE);
+    setLink({ code, role: "guest" });
+    setMode("online");
+    setStatus(fresh);
+    setPast([]);
+    setSelected(null);
+    setPreview(null);
+    setFlight(null);
+    flightRef.current = null;
+    queueRef.current = [];
+    earlyRef.current = [];
+    greeted.current = false;
+    acked.current = false;
+    peerIdRef.current = "";
+    setPeerState("wait");
+    setPeers([]);
+    setJoinError("");
+    setNote("Entrando a la mesa…");
+    setScreen("play");
+  }
+
+  function commit(move: Move, remember: boolean) {
+    if (flightRef.current) {
+      if (!remember) queueRef.current.push(move);
+      return;
+    }
+    if (mode === "online" && remember) sendRef.current({ t: "move", move });
+    setSelected(null);
+    setPreview(null);
+    const next = { move, remember, hop: 0, fromStatus: statusRef.current };
+    flightRef.current = next;
+    setFlight(next);
   }
 
   function undo() {
@@ -195,6 +396,17 @@ export function Game() {
     setPast([]);
     setSelected(null);
     setPreview(null);
+    setFlight(null);
+    flightRef.current = null;
+    setLink(null);
+    setMode("ai");
+    setPeerState("wait");
+    setPeers([]);
+    queueRef.current = [];
+    earlyRef.current = [];
+    greeted.current = false;
+    acked.current = false;
+    peerIdRef.current = "";
   }
 
   function onSquare(r: number, c: number) {
@@ -228,6 +440,49 @@ export function Game() {
     setPreview(null);
   }
 
+  onNetRef.current = (data: unknown) => {
+    if (!data || typeof data !== "object") return;
+    const msg = data as { t?: string; move?: unknown; you?: unknown; them?: unknown; status?: unknown; pending?: unknown };
+    if (msg.t === "ack") {
+      acked.current = true;
+      return;
+    }
+    if (msg.t === "hello") {
+      if (linkRef.current?.role !== "guest") return;
+      if (greeted.current) {
+        sendRef.current({ t: "ack" });
+        return;
+      }
+      if (!isStatus(msg.status) || !isCountry(msg.you) || !isCountry(msg.them)) return;
+      greeted.current = true;
+      const queued = [...earlyRef.current];
+      earlyRef.current = [];
+      queueRef.current = [];
+      if (isMove(msg.pending)) queueRef.current.push(msg.pending);
+      for (const move of queued) if (isMove(move)) queueRef.current.push(move);
+      statusRef.current = msg.status;
+      setYou(msg.you);
+      setThem(msg.them);
+      setStatus(msg.status);
+      setPast([]);
+      setSelected(null);
+      setPreview(null);
+      setPeerState("ok");
+      setNote(msg.status.turn === "silver" ? "Te toca." : "Oro sale.");
+      sendRef.current({ t: "ack" });
+      return;
+    }
+    if (msg.t === "move" && isMove(msg.move)) {
+      if (linkRef.current?.role === "guest" && !greeted.current) {
+        earlyRef.current.push(msg.move);
+        return;
+      }
+      const legal = legalMoves(statusRef.current.board, statusRef.current.turn);
+      const found = legal.find((move) => sameMove(move, msg.move as Move));
+      if (found) commit(found, false);
+    }
+  };
+
   if (!ready) return <main className="wood-app" />;
 
   if (screen === "home") {
@@ -249,6 +504,56 @@ export function Game() {
             <button type="button" className="btn ghost" onClick={() => begin("hotseat")}>
               Los dos en el teléfono
             </button>
+            <button type="button" className="btn ghost" onClick={openTable}>
+              Mesa con alguien
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (screen === "table") {
+    return (
+      <main className="wood-app">
+        <div className="stage">
+          <header className="home-head">
+            <p className="eyebrow">En línea</p>
+            <h1>Una mesa</h1>
+            <p className="lede">Tú llevas oro y sales. La otra persona lleva plata. Pásale el código, o entra al suyo.</p>
+          </header>
+          <div className="home-actions">
+            <button type="button" className="btn primary" onClick={createTable}>
+              Crear mesa
+            </button>
+          </div>
+          <div className="code-row">
+            <input
+              className="code-input"
+              value={draft}
+              onChange={(event) => {
+                setDraft(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4));
+                setJoinError("");
+              }}
+              placeholder="CÓDIGO"
+              aria-label="Código de la mesa"
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
+              maxLength={4}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") joinTable();
+              }}
+            />
+            <button type="button" className="btn primary" onClick={joinTable}>
+              Entrar
+            </button>
+          </div>
+          {joinError ? <p className="join-error">{joinError}</p> : null}
+          <div className="home-actions">
+            <button type="button" className="btn ghost" onClick={() => setScreen("home")}>
+              Volver
+            </button>
           </div>
         </div>
       </main>
@@ -257,7 +562,9 @@ export function Game() {
 
   const goldName = countryName(you);
   const silverName = countryName(them);
-  const flipped = mode === "hotseat" && status.turn === "silver" && !status.winner;
+  const flipped =
+    (mode === "online" && link?.role === "guest") ||
+    (mode === "hotseat" && status.turn === "silver" && !status.winner);
   const selectedMoves = selected ? moves.filter((move) => same(move.from, selected)) : [];
   const mustCapture = moves.some((move) => move.captures.length > 0);
 
@@ -268,6 +575,13 @@ export function Game() {
   else if (thinking) turnText = "La máquina piensa";
   else if (mode === "ai" && status.turn === "gold") turnText = "Te toca";
   else if (mode === "hotseat") turnText = status.turn === "gold" ? `Oro · ${goldName}` : `Plata · ${silverName}`;
+  else if (mode === "online" && link?.role === "guest" && peerState !== "ok") turnText = peerState === "fail" ? "Sin conexión" : "Entrando";
+  else if (mode === "online" && peerState === "wait") turnText = "Esperando";
+  else if (mode === "online" && peerState === "fail") turnText = "Sin conexión";
+  else if (mode === "online" && status.turn === mySide) turnText = "Te toca";
+  else if (mode === "online") turnText = "Le toca";
+
+  const guestWait = mode === "online" && link?.role === "guest" && peerState !== "ok";
 
   return (
     <main className="wood-app play">
@@ -280,6 +594,37 @@ export function Game() {
         <SideScore metal="silver" label="Plata" country={them} count={countPieces(status.board, "silver")} active={status.turn === "silver" && !status.winner} />
       </header>
 
+      {mode === "online" && link ? (
+        <div className="room-banner">
+          <span>{link.role === "host" ? "Tu mesa" : "Mesa"}</span>
+          <strong>{link.code}</strong>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => {
+              const code = link.code;
+              void navigator.clipboard?.writeText(code).then(
+                () => setNote("Código copiado."),
+                () => setNote(code),
+              );
+            }}
+          >
+            Copiar
+          </button>
+        </div>
+      ) : null}
+
+      {guestWait ? (
+        <div className="wait-card">
+          <p className="eyebrow">Plata</p>
+          <strong className="code-big">{link?.code}</strong>
+          <p>
+            {peerState === "fail"
+              ? "No se pudo conectar. Revisa el código o crea otra mesa."
+              : "Esperando a quien creó la mesa…"}
+          </p>
+        </div>
+      ) : (
       <div className={`board-wrap ${flipped ? "is-flipped" : ""}`}>
         <div className="board" role="grid" aria-label="Tablero de damas">
           {status.board.map((row, r) =>
@@ -299,6 +644,7 @@ export function Game() {
                   type="button"
                   role="gridcell"
                   className={`sq ${dark ? "dark" : "light"} ${isSel ? "sel" : ""} ${isDest ? "dest" : ""} ${victims ? "victim" : ""}`}
+                  data-rc={`${r}-${c}`}
                   onClick={() => onSquare(r, c)}
                   aria-label={piece ? `${piece.kind === "king" ? "dama" : "ficha"} ${piece.side}` : dark ? "casilla" : "clara"}
                 >
@@ -340,6 +686,7 @@ export function Game() {
           ) : null}
         </div>
       </div>
+      )}
 
       {preview ? (
         <button type="button" className="btn primary slim" onClick={() => commit(preview, true)}>
@@ -348,7 +695,7 @@ export function Game() {
       ) : null}
 
       <footer className="play-foot">
-        <button type="button" className="btn ghost" onClick={undo} disabled={past.length === 0 || !!flight}>
+        <button type="button" className="btn ghost" onClick={undo} disabled={past.length === 0 || !!flight || mode === "online"}>
           Deshacer
         </button>
         <button type="button" className="btn ghost" onClick={() => setRules(true)}>
@@ -358,6 +705,16 @@ export function Game() {
           Mesa nueva
         </button>
       </footer>
+
+      {link && screen === "play" ? (
+        <RoomBridge
+          code={link.code}
+          role={link.role}
+          sendRef={sendRef}
+          onPeers={setPeers}
+          onNetRef={onNetRef}
+        />
+      ) : null}
 
       {rules ? (
         <div className="sheet" role="dialog" aria-label="Reglas">
@@ -451,4 +808,28 @@ function SideScore({
       <small>{label}</small>
     </div>
   );
+}
+
+function RoomBridge({
+  code,
+  role,
+  sendRef,
+  onPeers,
+  onNetRef,
+}: {
+  code: string;
+  role: "host" | "guest";
+  sendRef: { current: (data: unknown) => void };
+  onPeers: (peers: PeerInfo[]) => void;
+  onNetRef: { current: (data: unknown) => void };
+}) {
+  const linkRoom = useP2PRoom({ room: `ddamas-${code}`, name: role });
+  useEffect(() => {
+    sendRef.current = linkRoom.send;
+  }, [linkRoom.send, sendRef]);
+  useEffect(() => linkRoom.onMessage((_from, data) => onNetRef.current(data)), [linkRoom.onMessage, onNetRef]);
+  useEffect(() => {
+    onPeers(linkRoom.peers);
+  }, [linkRoom.peers, onPeers]);
+  return null;
 }

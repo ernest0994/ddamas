@@ -11,6 +11,7 @@
  */
 import { spawn } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -294,6 +295,18 @@ async function waitForReady(failure) {
 
 async function restart() {
   if (!(await stop())) return 1;
+  // The bundled PGLite looks for its wasm next to the chunk. Nitro does not
+  // copy those files, and a route that imports the database crashes preview
+  // without them. Deployed Neon never loads PGLite.
+  const dest = join(ROOT, ".vercel/output/functions/__server.func/_libs");
+  const src = join(ROOT, "node_modules/@electric-sql/pglite/dist");
+  if (existsSync(dest) && existsSync(src)) {
+    for (const name of ["pglite.data", "pglite.wasm", "initdb.wasm"]) {
+      const from = join(src, name);
+      const to = join(dest, name);
+      if (existsSync(from) && !existsSync(to)) copyFileSync(from, to);
+    }
+  }
 
   mkdirSync(dirname(LOG_FILE), { recursive: true });
   const log = openSync(LOG_FILE, "a");
