@@ -16,8 +16,8 @@ export function Cap({
 }) {
   const uid = useId().replace(/:/g, "");
   const n = 28;
-  const edge = metal === "gold" ? "#e2b340" : "#d7dee3";
-  const edgeDark = metal === "gold" ? "#8d6414" : "#7e878e";
+  const edge = metal === "gold" ? "#f0c14b" : "#d5dee8";
+  const edgeDark = metal === "gold" ? "#8a5a10" : "#3e4c5c";
   let d = "";
   for (let i = 0; i < n; i++) {
     const left = (i / n) * Math.PI * 2;

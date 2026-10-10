@@ -21,6 +21,39 @@
     #1c130d;
   color: #f3e6c8;
   padding: 20px 14px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.stage {
+  width: min(100%, 920px);
+  text-align: center;
+}
+
+.side-rule,
+.hint {
+  margin: 10px auto 0;
+  max-width: 34rem;
+  color: #e6d3b0;
+  line-height: 1.45;
+}
+
+.hint {
+  margin-top: 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #c4a574;
+}
+
+.picker.gold .hint {
+  color: #e2b340;
+}
+
+.picker.silver .hint {
+  color: #d5dee8;
 }
 
 .wood-app.play {
@@ -53,7 +86,7 @@
 }
 
 .lede {
-  margin: 0;
+  margin: 0 auto;
   max-width: 36rem;
   color: #e6d3b0;
   line-height: 1.45;
@@ -73,10 +106,15 @@
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 6px;
+  justify-content: safe center;
+}
+
+.picker.silver button.on .cap {
+  outline-color: #d5dee8;
 }
 
 .picker-row button {
-  flex: 0 0 76px;
+  flex: 0 0 72px;
   border: 0;
   background: transparent;
   color: #d9c7a4;
@@ -115,6 +153,8 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 22px;
+  justify-content: center;
+  width: min(100%, 640px);
 }
 
 .btn {
@@ -151,6 +191,7 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 10px;
+  width: min(100%, 640px);
 }
 
 .score {
@@ -170,8 +211,27 @@
   height: 42px;
 }
 
+.score.gold.on .cap {
+  outline: 2px solid #f0c14b;
+  outline-offset: 3px;
+  border-radius: 50%;
+}
+
+.score.silver.on .cap {
+  outline: 2px solid #d5dee8;
+  outline-offset: 3px;
+  border-radius: 50%;
+}
+
 .score b {
   font-size: 16px;
+}
+
+.score small {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #c4a574;
 }
 
 .turn-block {
@@ -210,10 +270,40 @@
 }
 
 .board {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(10, 1fr);
   border-radius: 8px;
   overflow: hidden;
+}
+
+.traveler {
+  position: absolute;
+  z-index: 4;
+  width: 10%;
+  height: 10%;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.traveler.go {
+  transition: left 0.42s cubic-bezier(0.2, 0.7, 0.2, 1), top 0.42s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.traveler .cap {
+  width: 86%;
+  height: 86%;
+}
+
+.is-eaten .cap {
+  transform: scale(0.2);
+  opacity: 0;
+  transition: transform 0.22s ease, opacity 0.22s ease;
+}
+
+.board-wrap.is-flipped .is-eaten .cap {
+  transform: rotate(180deg) scale(0.2);
 }
 
 .sq {

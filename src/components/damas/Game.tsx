@@ -25,6 +25,13 @@ type Save = {
   status: Status;
 };
 
+type Flight = {
+  move: Move;
+  remember: boolean;
+  hop: number;
+  fromStatus: Status;
+};
+
 function same(a: Pos, b: Pos) {
   return a.r === b.r && a.c === b.c;
 }
@@ -60,6 +67,8 @@ export function Game() {
   const [note, setNote] = useState("");
   const [rules, setRules] = useState(false);
   const [crowned, setCrowned] = useState<string | null>(null);
+  const [flight, setFlight] = useState<Flight | null>(null);
+  const [glide, setGlide] = useState(false);
 
   useEffect(() => {
     try {
@@ -88,8 +97,51 @@ export function Game() {
     () => (status.winner ? [] : legalMoves(status.board, status.turn)),
     [status],
   );
-  const human = mode === "hotseat" || status.turn === "gold";
-  const thinking = screen === "play" && mode === "ai" && status.turn === "silver" && !status.winner;
+  const human = (mode === "hotseat" || status.turn === "gold") && !flight;
+  const thinking = screen === "play" && mode === "ai" && status.turn === "silver" && !status.winner && !flight;
+
+  useEffect(() => {
+    if (!flight) {
+      setGlide(false);
+      return;
+    }
+    if (!glide) {
+      const frame = requestAnimationFrame(() => setGlide(true));
+      return () => cancelAnimationFrame(frame);
+    }
+    const last = flight.move.path.length - 1;
+    if (flight.hop < last) {
+      const wait = flight.hop === 0 ? 30 : 460;
+      const timer = window.setTimeout(() => {
+        if (flight.move.captures[flight.hop]) blip(190);
+        else blip(340);
+        setFlight((current) => (current ? { ...current, hop: current.hop + 1 } : current));
+      }, wait);
+      return () => window.clearTimeout(timer);
+    }
+    const timer = window.setTimeout(() => {
+      const { move, remember, fromStatus } = flight;
+      if (remember) setPast((stack) => [...stack, fromStatus].slice(-40));
+      setStatus(step(fromStatus, move));
+      setFlight(null);
+      setGlide(false);
+      if (move.promote) {
+        setCrowned(`${move.to.r}-${move.to.c}`);
+        setNote("Dama.");
+        blip(620);
+      } else if (move.captures.length > 0) {
+        const n = move.captures.length;
+        const mine = fromStatus.turn === "gold";
+        setNote(mode === "hotseat" ? `Come ${n}.` : mine ? `Comiste ${n}.` : `Te comieron ${n}.`);
+      } else {
+        setNote("");
+      }
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate(move.captures.length > 1 ? [10, 40, 10] : 12);
+      }
+    }, 420);
+    return () => window.clearTimeout(timer);
+  }, [flight, glide, mode]);
 
   useEffect(() => {
     if (!thinking) return;
@@ -116,30 +168,14 @@ export function Game() {
   }
 
   function commit(move: Move, remember: boolean) {
-    if (remember) setPast((stack) => [...stack, status].slice(-40));
-    const next = step(status, move);
-    setStatus(next);
+    if (flight) return;
     setSelected(null);
     setPreview(null);
-    if (move.promote) {
-      setCrowned(`${move.to.r}-${move.to.c}`);
-      setNote("Dama.");
-      blip(620);
-    } else if (move.captures.length > 0) {
-      const mine = move.from && status.turn === "gold";
-      const n = move.captures.length;
-      setNote(
-        mode === "hotseat" ? `Come ${n}.` : mine ? `Comiste ${n}.` : `Te comieron ${n}.`,
-      );
-      blip(180);
-    } else {
-      setNote("");
-      blip(340);
-    }
-    if (typeof navigator !== "undefined" && navigator.vibrate) navigator.vibrate(12);
+    setFlight({ move, remember, hop: 0, fromStatus: status });
   }
 
   function undo() {
+    if (flight) return;
     setPast((stack) => {
       const copy = [...stack];
       const prev = copy.pop();
@@ -197,20 +233,23 @@ export function Game() {
   if (screen === "home") {
     return (
       <main className="wood-app">
-        <header className="home-head">
-          <p className="eyebrow">Chapas</p>
-          <h1>DDamas</h1>
-          <p className="lede">Damas dominicanas. La ficha es la chapa. La dama es esa misma chapa, volteada.</p>
-        </header>
-        <Picker label="Tus chapas" value={you} onChange={setYou} />
-        <Picker label="Las otras" value={them} onChange={setThem} />
-        <div className="home-actions">
-          <button type="button" className="btn primary" onClick={() => begin("ai")}>
-            Contra la máquina
-          </button>
-          <button type="button" className="btn ghost" onClick={() => begin("hotseat")}>
-            Los dos en el teléfono
-          </button>
+        <div className="stage">
+          <header className="home-head">
+            <p className="eyebrow">Chapas</p>
+            <h1>DDamas</h1>
+            <p className="lede">Damas dominicanas. La ficha es la chapa. La dama es esa misma chapa, volteada.</p>
+          </header>
+          <p className="side-rule">Oro sale primero. Tú llevas la falda de oro. La otra lleva plata. La bandera es el dibujo, no el lado.</p>
+          <Picker label="Tú" hint="Falda de oro" metal="gold" value={you} onChange={setYou} />
+          <Picker label="La otra" hint="Falda de plata" metal="silver" value={them} onChange={setThem} />
+          <div className="home-actions">
+            <button type="button" className="btn primary" onClick={() => begin("ai")}>
+              Contra la máquina
+            </button>
+            <button type="button" className="btn ghost" onClick={() => begin("hotseat")}>
+              Los dos en el teléfono
+            </button>
+          </div>
         </div>
       </main>
     );
@@ -233,12 +272,12 @@ export function Game() {
   return (
     <main className="wood-app play">
       <header className="play-head">
-        <SideScore metal="gold" country={you} count={countPieces(status.board, "gold")} active={status.turn === "gold" && !status.winner} />
+        <SideScore metal="gold" label="Oro" country={you} count={countPieces(status.board, "gold")} active={status.turn === "gold" && !status.winner} />
         <div className="turn-block">
           <strong>{turnText}</strong>
           <span>{note || (mustCapture && human ? "Tienes que comer." : "\u00a0")}</span>
         </div>
-        <SideScore metal="silver" country={them} count={countPieces(status.board, "silver")} active={status.turn === "silver" && !status.winner} />
+        <SideScore metal="silver" label="Plata" country={them} count={countPieces(status.board, "silver")} active={status.turn === "silver" && !status.winner} />
       </header>
 
       <div className={`board-wrap ${flipped ? "is-flipped" : ""}`}>
@@ -246,9 +285,14 @@ export function Game() {
           {status.board.map((row, r) =>
             row.map((piece, c) => {
               const dark = isDark(r, c);
-              const isDest = selectedMoves.some((move) => move.to.r === r && move.to.c === c);
-              const isSel = selected ? same(selected, { r, c }) : false;
-              const victims = preview?.captures.some((pos) => same(pos, { r, c }));
+              const here = { r, c };
+              const isDest = selectedMoves.some((move) => same(move.to, here));
+              const isSel = selected ? same(selected, here) : false;
+              const victims = preview?.captures.some((pos) => same(pos, here));
+              const gone =
+                flight?.move.captures.some((cap, index) => index < flight.hop - 1 && same(cap, here)) ||
+                (flight ? same(flight.move.from, here) : false);
+              const eating = flight?.move.captures.some((cap, index) => index === flight.hop - 1 && same(cap, here));
               return (
                 <button
                   key={`${r}-${c}`}
@@ -258,14 +302,16 @@ export function Game() {
                   onClick={() => onSquare(r, c)}
                   aria-label={piece ? `${piece.kind === "king" ? "dama" : "ficha"} ${piece.side}` : dark ? "casilla" : "clara"}
                 >
-                  {piece ? (
-                    <Cap
-                      country={piece.side === "gold" ? you : them}
-                      metal={piece.side}
-                      king={piece.kind === "king"}
-                      lift={isSel}
-                      crowned={crowned === `${r}-${c}` && piece.kind === "king"}
-                    />
+                  {piece && !gone ? (
+                    <span className={eating ? "is-eaten" : undefined}>
+                      <Cap
+                        country={piece.side === "gold" ? you : them}
+                        metal={piece.side}
+                        king={piece.kind === "king"}
+                        lift={isSel}
+                        crowned={crowned === `${r}-${c}` && piece.kind === "king"}
+                      />
+                    </span>
                   ) : isDest ? (
                     <i className="dot" />
                   ) : null}
@@ -273,6 +319,25 @@ export function Game() {
               );
             }),
           )}
+          {flight ? (
+            <div
+              className={`traveler ${glide ? "go" : ""}`}
+              style={{
+                left: `${flight.move.path[flight.hop].c * 10}%`,
+                top: `${flight.move.path[flight.hop].r * 10}%`,
+              }}
+            >
+              <Cap
+                country={flight.fromStatus.turn === "gold" ? you : them}
+                metal={flight.fromStatus.turn}
+                king={
+                  flight.fromStatus.board[flight.move.from.r][flight.move.from.c]?.kind === "king" ||
+                  (flight.move.promote && flight.hop === flight.move.path.length - 1)
+                }
+                crowned={flight.move.promote && flight.hop === flight.move.path.length - 1}
+              />
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -283,7 +348,7 @@ export function Game() {
       ) : null}
 
       <footer className="play-foot">
-        <button type="button" className="btn ghost" onClick={undo} disabled={past.length === 0}>
+        <button type="button" className="btn ghost" onClick={undo} disabled={past.length === 0 || !!flight}>
           Deshacer
         </button>
         <button type="button" className="btn ghost" onClick={() => setRules(true)}>
@@ -301,7 +366,11 @@ export function Game() {
             <div className="legend">
               <div>
                 <Cap country={you} metal="gold" king={false} />
-                <span>Ficha</span>
+                <span>Oro</span>
+              </div>
+              <div>
+                <Cap country={them} metal="silver" king={false} />
+                <span>Plata</span>
               </div>
               <div>
                 <Cap country={you} metal="gold" king />
@@ -328,16 +397,21 @@ export function Game() {
 
 function Picker({
   label,
+  hint,
+  metal,
   value,
   onChange,
 }: {
   label: string;
+  hint: string;
+  metal: Side;
   value: CountryId;
   onChange: (id: CountryId) => void;
 }) {
   return (
-    <section className="picker">
+    <section className={`picker ${metal}`}>
       <h2>{label}</h2>
+      <p className="hint">{hint}</p>
       <div className="picker-row">
         {COUNTRIES.map((country) => (
           <button
@@ -348,7 +422,7 @@ function Picker({
             aria-pressed={country.id === value}
             aria-label={country.name}
           >
-            <Cap country={country.id} metal="gold" king={false} />
+            <Cap country={country.id} metal={metal} king={false} />
             <span>{country.short}</span>
           </button>
         ))}
@@ -359,19 +433,22 @@ function Picker({
 
 function SideScore({
   metal,
+  label,
   country,
   count,
   active,
 }: {
   metal: Side;
+  label: string;
   country: CountryId;
   count: number;
   active: boolean;
 }) {
   return (
-    <div className={`score ${active ? "on" : ""}`}>
+    <div className={`score ${metal} ${active ? "on" : ""}`}>
       <Cap country={country} metal={metal} king={false} />
       <b>{count}</b>
+      <small>{label}</small>
     </div>
   );
 }
