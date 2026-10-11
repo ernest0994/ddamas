@@ -9,15 +9,15 @@ export function Cap({
   crowned,
 }: {
   country: CountryId;
-  metal: "gold" | "silver";
+  metal: "gold" | "silver" | "steel";
   king: boolean;
   lift?: boolean;
   crowned?: boolean;
 }) {
   const uid = useId().replace(/:/g, "");
   const n = 28;
-  const edge = metal === "gold" ? "#f0c14b" : "#d5dee8";
-  const edgeDark = metal === "gold" ? "#8a5a10" : "#3e4c5c";
+  const edge = metal === "gold" ? "#f0c14b" : metal === "silver" ? "#d5dee8" : "#c8bfb2";
+  const edgeDark = metal === "gold" ? "#8a5a10" : metal === "silver" ? "#3e4c5c" : "#5a5046";
   let d = "";
   for (let i = 0; i < n; i++) {
     const left = (i / n) * Math.PI * 2;
