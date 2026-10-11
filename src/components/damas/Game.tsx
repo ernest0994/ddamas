@@ -40,6 +40,7 @@ type NetHello = {
   you: CountryId;
   them: CountryId;
   hostSide: Side;
+  hostName: string;
   status: Status;
   pending?: Move | null;
 };
@@ -57,6 +58,10 @@ function sameMove(a: Move, b: Move) {
     a.captures.length === b.captures.length &&
     a.captures.every((cap, index) => same(cap, b.captures[index]))
   );
+}
+
+function cleanName(value: string) {
+  return value.replace(/\s+/g, " ").trim().slice(0, 18);
 }
 
 function freshCode() {
@@ -105,6 +110,9 @@ export function Game() {
   const [myClaim, setMyClaim] = useState<Side | null>(null);
   const [theirClaim, setTheirClaim] = useState<Side | null>(null);
   const [onlineSide, setOnlineSide] = useState<Side | null>(null);
+  const [myName, setMyName] = useState("");
+  const [otherName, setOtherName] = useState("");
+  const [theirName, setTheirName] = useState("");
   const [draft, setDraft] = useState("");
   const [joinError, setJoinError] = useState("");
   const [peerState, setPeerState] = useState<"wait" | "ok" | "fail">("wait");
@@ -123,6 +131,7 @@ export function Game() {
   const theirFlagRef = useRef(theirFlag);
   const myClaimRef = useRef(myClaim);
   const onlineSideRef = useRef(onlineSide);
+  const myNameRef = useRef(myName);
   const seatedRef = useRef(false);
   const peersRef = useRef(peers);
   const onNetRef = useRef<(data: unknown) => void>(() => {});
@@ -135,6 +144,7 @@ export function Game() {
   theirFlagRef.current = theirFlag;
   myClaimRef.current = myClaim;
   onlineSideRef.current = onlineSide;
+  myNameRef.current = myName;
   seatedRef.current = onlineSide !== null;
   peersRef.current = peers;
 
@@ -150,6 +160,10 @@ export function Game() {
         setStatus(saved.status);
         setScreen("play");
       }
+      const savedName = localStorage.getItem("ddamas-name");
+      const savedOther = localStorage.getItem("ddamas-other");
+      if (savedName) setMyName(savedName);
+      if (savedOther) setOtherName(savedOther);
     } catch {
       /* a bad save just starts fresh */
     }
@@ -173,6 +187,24 @@ export function Game() {
       (mode === "ai" && status.turn === "gold") ||
       (mode === "online" && status.turn === mySide && (link?.role !== "guest" || peerState === "ok")));
   const thinking = screen === "play" && mode === "ai" && status.turn === "silver" && !status.winner && !flight;
+  const me = cleanName(myName) || "Tú";
+  const rival =
+    mode === "ai" ? "La máquina" : mode === "hotseat" ? cleanName(otherName) || "La otra" : cleanName(theirName) || "La otra";
+  const goldPlayer = mode === "online" && onlineSide === "silver" ? rival : me;
+  const silverPlayer = mode === "ai" ? "La máquina" : mode === "hotseat" ? cleanName(otherName) || "La otra" : onlineSide === "gold" ? rival : me;
+
+  useEffect(() => {
+    if (!human || status.winner || flight) return;
+    const froms: Pos[] = [];
+    for (const move of moves) {
+      if (move.captures.length === 0) continue;
+      if (!froms.some((pos) => same(pos, move.from))) froms.push(move.from);
+    }
+    if (froms.length !== 1) return;
+    if (selected && same(selected, froms[0])) return;
+    setSelected(froms[0]);
+    setPreview(null);
+  }, [human, moves, flight, status.winner, selected]);
 
   useEffect(() => {
     if (!flight) {
@@ -262,7 +294,7 @@ export function Game() {
       if (!seatedRef.current) {
         setPeerState(connected ? "ok" : failed ? "fail" : "wait");
         if (!connected) return;
-        sendRef.current({ t: "sit", country: mineRef.current, claim: myClaimRef.current });
+        sendRef.current({ t: "sit", country: mineRef.current, claim: myClaimRef.current, name: myNameRef.current });
         return;
       }
       if (linkNow.role === "host") {
@@ -274,6 +306,7 @@ export function Game() {
           you: youRef.current,
           them: themRef.current,
           hostSide: onlineSideRef.current === "silver" ? "silver" : "gold",
+          hostName: cleanName(myNameRef.current),
           status: statusRef.current,
           pending: flying?.remember ? flying.move : null,
         };
@@ -360,6 +393,7 @@ export function Game() {
   function resetOnlineSeat() {
     setTheirFlag(null);
     theirFlagRef.current = null;
+    setTheirName("");
     setTheirClaim(null);
     setMyClaim(null);
     myClaimRef.current = null;
@@ -465,7 +499,7 @@ export function Game() {
     setMyClaim(side);
     myClaimRef.current = side;
     if (!seatedRef.current && linkRef.current) {
-      sendRef.current({ t: "sit", country: mineRef.current, claim: side });
+      sendRef.current({ t: "sit", country: mineRef.current, claim: side, name: myNameRef.current });
     }
   }
 
@@ -473,7 +507,7 @@ export function Game() {
     setMine(id);
     mineRef.current = id;
     if (!seatedRef.current && linkRef.current) {
-      sendRef.current({ t: "sit", country: id, claim: myClaimRef.current });
+      sendRef.current({ t: "sit", country: id, claim: myClaimRef.current, name: myNameRef.current });
     }
   }
 
@@ -529,8 +563,29 @@ export function Game() {
     peerIdRef.current = "";
   }
 
+  function rename(value: string) {
+    const next = value.slice(0, 18);
+    setMyName(next);
+    myNameRef.current = next;
+    localStorage.setItem("ddamas-name", next);
+    if (!seatedRef.current && linkRef.current) {
+      sendRef.current({ t: "sit", country: mineRef.current, claim: myClaimRef.current, name: next });
+    }
+  }
+
+  function renameOther(value: string) {
+    const next = value.slice(0, 18);
+    setOtherName(next);
+    localStorage.setItem("ddamas-other", next);
+  }
+
   function onSquare(r: number, c: number) {
-    if (!human || status.winner) return;
+    const actor = status.turn === "gold" ? goldPlayer : silverPlayer;
+    if (status.winner) return;
+    if (!human) {
+      if (!flight) setNote(`Le toca a ${actor}.`);
+      return;
+    }
     const here = selected
       ? moves.filter((move) => same(move.from, selected) && move.to.r === r && move.to.c === c)
       : [];
@@ -550,10 +605,20 @@ export function Game() {
       return;
     }
     const piece = status.board[r][c];
+    const forced = moves.some((move) => move.captures.length > 0);
     if (piece && piece.side === status.turn && moves.some((move) => same(move.from, { r, c }))) {
       setSelected({ r, c });
       setPreview(null);
-      if (moves.some((move) => move.captures.length > 0)) setNote("Tienes que comer.");
+      if (forced) setNote("Tienes que comer con esta.");
+      else setNote("");
+      return;
+    }
+    if (piece && piece.side === status.turn) {
+      setNote(forced ? "Esa no come. Juega la chapa marcada." : "Esa ficha no se puede mover.");
+      return;
+    }
+    if (forced && piece) {
+      setNote("Esa es la que se come. Elige la chapa marcada.");
       return;
     }
     setSelected(null);
@@ -572,6 +637,8 @@ export function Game() {
       hostSide?: unknown;
       country?: unknown;
       claim?: unknown;
+      name?: unknown;
+      hostName?: unknown;
       gold?: unknown;
       hostFlag?: unknown;
       guestFlag?: unknown;
@@ -585,6 +652,7 @@ export function Game() {
       theirFlagRef.current = msg.country;
       setTheirFlag(msg.country);
       setTheirClaim(msg.claim === "gold" || msg.claim === "silver" ? msg.claim : null);
+      if (typeof msg.name === "string" && msg.name.trim()) setTheirName(msg.name.slice(0, 18));
       setPeerState("ok");
       return;
     }
@@ -625,6 +693,7 @@ export function Game() {
       setPreview(null);
       setPeerState("ok");
       setScreen("play");
+      if (typeof msg.hostName === "string" && msg.hostName.trim()) setTheirName(msg.hostName.slice(0, 18));
       setNote(msg.status.turn === mineSide ? "Te toca." : "Le toca.");
       sendRef.current({ t: "ack" });
       return;
@@ -652,6 +721,11 @@ export function Game() {
             <p className="lede">Damas dominicanas. La ficha es la chapa. La dama es esa misma chapa, volteada.</p>
           </header>
           <p className="side-rule">Oro sale primero. Tú llevas la falda de oro. La otra lleva plata. La bandera es el dibujo, no el lado.</p>
+          <div className="name-row">
+            <NameField label="Tu nombre" value={myName} placeholder="Ana" onChange={rename} />
+            <NameField label="La otra" value={otherName} placeholder="Luis" onChange={renameOther} />
+          </div>
+          <p className="hint name-hint">En el teléfono van los dos nombres. En línea, cada quien escribe el suyo.</p>
           <Picker label="Tú" hint="Falda de oro" metal="gold" value={you} onChange={setYou} />
           <Picker label="La otra" hint="Falda de plata" metal="silver" value={them} onChange={setThem} />
           <div className="home-actions">
@@ -753,15 +827,18 @@ export function Game() {
             </button>
           </div>
           {note ? <p className="lede">{note}</p> : null}
+          <NameField label="Tu nombre" value={myName} placeholder="Ana" onChange={rename} />
           <Picker label="Tu chapa" hint={myClaim === "gold" ? "Quieres oro" : myClaim === "silver" ? "Quieres plata" : "La bandera es el dibujo"} metal={skirt} value={mine} onChange={pickMine} />
           <div className="their-seat">
             {theirFlag ? (
               <>
                 <Cap country={theirFlag} metal={theirClaim ?? "steel"} king={false} />
                 <div>
-                  <strong>{countryName(theirFlag)}</strong>
+                  <strong>{cleanName(theirName) || "Sin nombre"}</strong>
                   <span>
-                    {theirClaim === "gold" ? "Quiere oro" : theirClaim === "silver" ? "Quiere plata" : "Ya está. Falta el lado."}
+                    {countryName(theirFlag)}
+                    {" · "}
+                    {theirClaim === "gold" ? "quiere oro" : theirClaim === "silver" ? "quiere plata" : "falta el lado"}
                   </span>
                 </div>
               </>
@@ -794,38 +871,58 @@ export function Game() {
     );
   }
 
-  const goldName = countryName(you);
-  const silverName = countryName(them);
   const flipped =
     (mode === "online" && onlineSide === "silver") ||
     (mode === "hotseat" && status.turn === "silver" && !status.winner);
   const selectedMoves = selected ? moves.filter((move) => same(move.from, selected)) : [];
-  const mustCapture = moves.some((move) => move.captures.length > 0);
-
-  let turnText = status.turn === "gold" ? goldName : silverName;
-  if (status.winner === "draw") turnText = "Tablas";
-  else if (status.winner === "gold" || status.winner === "silver") {
-    if (mode === "ai") turnText = status.winner === "gold" ? "Ganaste" : "Perdiste";
-    else if (mode === "online") turnText = status.winner === onlineSide ? "Ganaste" : "Perdiste";
-    else turnText = `Ganó ${status.winner === "gold" ? goldName : silverName}`;
+  const mustCount = moves.reduce((max, move) => Math.max(max, move.captures.length), 0);
+  const mustCapture = mustCount > 0;
+  const actor = status.turn === "gold" ? goldPlayer : silverPlayer;
+  const mineTurn =
+    mode === "hotseat" || (mode === "ai" && status.turn === "gold") || (mode === "online" && status.turn === mySide);
+  let bannerTitle = actor;
+  let bannerSub = note;
+  if (status.winner === "draw") {
+    bannerTitle = "Tablas";
+    bannerSub = "Nadie pudo más.";
+  } else if (status.winner) {
+    const winnerName = status.winner === "gold" ? goldPlayer : silverPlayer;
+    if (mode === "ai") bannerTitle = status.winner === "gold" ? "Ganaste" : "Perdiste";
+    else if (mode === "online") bannerTitle = status.winner === onlineSide ? "Ganaste" : "Perdiste";
+    else bannerTitle = `Ganó ${winnerName}`;
+    bannerSub = winnerName;
+  } else if (thinking) {
+    bannerTitle = silverPlayer;
+    bannerSub = "está pensando";
+  } else if (mustCapture && mineTurn) {
+    bannerTitle = `${actor}, tienes que comer`;
+    bannerSub = note || (mustCount > 1 ? `La comida más larga se lleva ${mustCount}.` : "No hay otra jugada.");
+  } else if (mustCapture) {
+    bannerTitle = `${actor} tiene que comer`;
+    bannerSub = note || "La regla no deja pasar la comida.";
+  } else if (mineTurn) {
+    bannerTitle = `${actor}, te toca`;
+    bannerSub = note || "Mueve una chapa.";
+  } else if (mode === "online" && peerState === "fail") {
+    bannerTitle = "Sin conexión";
+    bannerSub = actor;
+  } else {
+    bannerTitle = actor;
+    bannerSub = note || "Le toca a esta persona.";
   }
-  else if (thinking) turnText = "La máquina piensa";
-  else if (mode === "ai" && status.turn === "gold") turnText = "Te toca";
-  else if (mode === "hotseat") turnText = status.turn === "gold" ? `Oro · ${goldName}` : `Plata · ${silverName}`;
-  else if (mode === "online" && peerState === "fail") turnText = "Sin conexión";
-  else if (mode === "online" && peerState === "wait") turnText = "Esperando";
-  else if (mode === "online" && status.turn === mySide) turnText = "Te toca";
-  else if (mode === "online") turnText = "Le toca";
 
   const playView = (
-    <main className="wood-app play" data-side={onlineSide ?? ""} data-gold={you} data-silver={them}>
+    <main className="wood-app play" data-side={onlineSide ?? ""} data-gold={you} data-silver={them} data-turn={status.turn}>
+      <div className={`turn-banner ${status.winner ? "over" : status.turn} ${mustCapture && !status.winner ? "must" : ""}`}>
+        <strong>{bannerTitle}</strong>
+        <span>{bannerSub || "\u00a0"}</span>
+      </div>
       <header className="play-head">
-        <SideScore metal="gold" label="Oro" country={you} count={countPieces(status.board, "gold")} active={status.turn === "gold" && !status.winner} />
+        <SideScore metal="gold" tag="Oro" name={goldPlayer} country={you} count={countPieces(status.board, "gold")} active={status.turn === "gold" && !status.winner} />
         <div className="turn-block">
-          <strong>{turnText}</strong>
-          <span>{note || (mustCapture && human ? "Tienes que comer." : "\u00a0")}</span>
+          <span>contra</span>
         </div>
-        <SideScore metal="silver" label="Plata" country={them} count={countPieces(status.board, "silver")} active={status.turn === "silver" && !status.winner} />
+        <SideScore metal="silver" tag="Plata" name={silverPlayer} country={them} count={countPieces(status.board, "silver")} active={status.turn === "silver" && !status.winner} />
       </header>
 
       {mode === "online" && link ? (
@@ -848,7 +945,7 @@ export function Game() {
         </div>
       ) : null}
 
-      <div className={`board-wrap ${flipped ? "is-flipped" : ""}`}>
+      <div className={`board-wrap ${flipped ? "is-flipped" : ""} ${mustCapture && !status.winner ? "is-must" : ""}`}>
         <div className="board" role="grid" aria-label="Tablero de damas">
           {status.board.map((row, r) =>
             row.map((piece, c) => {
@@ -857,6 +954,9 @@ export function Game() {
               const isDest = selectedMoves.some((move) => same(move.to, here));
               const isSel = selected ? same(selected, here) : false;
               const victims = preview?.captures.some((pos) => same(pos, here));
+              const canFrom = moves.some((move) => same(move.from, here));
+              const canEat = mustCapture && moves.some((move) => move.captures.some((pos) => same(pos, here)));
+              const locked = Boolean(piece && piece.side === status.turn && !canFrom && !status.winner && !flight);
               const gone =
                 flight?.move.captures.some((cap, index) => index < flight.hop - 1 && same(cap, here)) ||
                 (flight ? same(flight.move.from, here) : false);
@@ -866,7 +966,7 @@ export function Game() {
                   key={`${r}-${c}`}
                   type="button"
                   role="gridcell"
-                  className={`sq ${dark ? "dark" : "light"} ${isSel ? "sel" : ""} ${isDest ? "dest" : ""} ${victims ? "victim" : ""}`}
+                  className={`sq ${dark ? "dark" : "light"} ${isSel ? "sel" : ""} ${isDest ? "dest" : ""} ${victims ? "victim" : ""} ${mustCapture && canFrom ? "must-from" : ""} ${canEat ? "must-eat" : ""} ${locked ? "locked" : ""}`}
                   data-rc={`${r}-${c}`}
                   onClick={() => onSquare(r, c)}
                   aria-label={piece ? `${piece.kind === "king" ? "dama" : "ficha"} ${piece.side}` : dark ? "casilla" : "clara"}
@@ -1019,23 +1119,51 @@ function Picker({
 
 function SideScore({
   metal,
-  label,
+  tag,
+  name,
   country,
   count,
   active,
 }: {
   metal: Side;
-  label: string;
+  tag: string;
+  name: string;
   country: CountryId;
   count: number;
   active: boolean;
 }) {
   return (
-    <div className={`score ${metal} ${active ? "on" : ""}`} aria-label={`${label} ${countryName(country)}`}>
+    <div className={`score ${metal} ${active ? "on" : ""}`} aria-label={`${tag} ${name}`}>
       <Cap country={country} metal={metal} king={false} />
       <b>{count}</b>
-      <small>{label}</small>
+      <small>{tag}</small>
+      <em>{name}</em>
     </div>
+  );
+}
+
+function NameField({
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="name-field">
+      <span>{label}</span>
+      <input
+        value={value}
+        placeholder={placeholder}
+        maxLength={18}
+        autoComplete="nickname"
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
   );
 }
 
